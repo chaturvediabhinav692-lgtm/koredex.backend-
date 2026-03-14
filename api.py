@@ -21,12 +21,11 @@ print("Gemini key loaded:", bool(os.getenv("GEMINI_API_KEY")))
 
 app = FastAPI(
     title="Koredex AI Debugger",
-    description="AI powered automated debugging engine",
     version="1.0"
 )
 
 
-# ================= ROOT HEALTH ENDPOINT =================
+# ================= HEALTH CHECK =================
 
 @app.get("/")
 def health():
@@ -179,12 +178,9 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
     # ================= INCREMENT USAGE =================
 
-    try:
-        supabase.table("users").update({
-            "runs_used": user_data["runs_used"] + 1
-        }).eq("id", user_id).execute()
-    except Exception as e:
-        print("Failed to update usage:", e)
+    supabase.table("users").update({
+        "runs_used": user_data["runs_used"] + 1
+    }).eq("id", user_id).execute()
 
     # ================= RESPONSE =================
 
@@ -195,3 +191,17 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
         "files_modified": result.get("files_modified", []),
         "iterations": result.get("iterations", 0)
     }
+
+
+# ================= SERVER START =================
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.environ.get("PORT", 8080))
+
+    uvicorn.run(
+        "api:app",
+        host="0.0.0.0",
+        port=port
+    )
