@@ -19,7 +19,18 @@ load_dotenv()
 
 print("Gemini key loaded:", bool(os.getenv("GEMINI_API_KEY")))
 
-app = FastAPI()
+app = FastAPI(
+    title="Koredex AI Debugger",
+    description="AI powered automated debugging engine",
+    version="1.0"
+)
+
+
+# ================= ROOT HEALTH ENDPOINT =================
+
+@app.get("/")
+def health():
+    return {"status": "koredex backend running"}
 
 
 # ================= ENABLE CORS =================
@@ -116,7 +127,8 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
         with tempfile.TemporaryDirectory() as temp_dir:
 
-            zip_path = os.path.join(temp_dir, file.filename)
+            filename = file.filename or "repo.zip"
+            zip_path = os.path.join(temp_dir, filename)
 
             with open(zip_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
@@ -167,11 +179,14 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
     # ================= INCREMENT USAGE =================
 
-    supabase.table("users").update({
-        "runs_used": user_data["runs_used"] + 1
-    }).eq("id", user_id).execute()
+    try:
+        supabase.table("users").update({
+            "runs_used": user_data["runs_used"] + 1
+        }).eq("id", user_id).execute()
+    except Exception as e:
+        print("Failed to update usage:", e)
 
-    # ================= CORRECT RESPONSE =================
+    # ================= RESPONSE =================
 
     return {
         "task_complete": result.get("task_complete", False),
