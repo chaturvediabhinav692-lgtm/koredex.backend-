@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Header
 from fastapi.middleware.cors import CORSMiddleware
 from supabase_client import supabase
 from dotenv import load_dotenv
+from jose import jwt
 
 import os
 import sys
@@ -17,6 +18,8 @@ from ai_desktop_bot.core import debug_loop
 # ================= LOAD ENV =================
 
 load_dotenv()
+
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 
 print("Gemini key loaded:", bool(os.getenv("GEMINI_API_KEY")), flush=True)
 
@@ -42,6 +45,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ================= TOKEN VERIFY =================
+
+def verify_token(token: str):
+
+    payload = jwt.decode(
+        token,
+        SUPABASE_JWT_SECRET,
+        algorithms=["HS256"],
+        audience="authenticated"
+    )
+
+    return payload["sub"]
 
 
 # ================= SECURITY: CODE SCAN =================
@@ -94,34 +111,23 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
     print(f"[{request_id}] RUN ENDPOINT HIT", flush=True)
 
-    # ================= AUTH =================
-
     if not authorization:
-        print(f"[{request_id}] Missing Authorization header", flush=True)
         return {"error": "Missing token"}
 
-    # sanitize token (remove Bearer + newline + spaces)
+    # clean header
     token = authorization.replace("Bearer", "").strip()
 
-    print(f"[{request_id}] Verifying Supabase token", flush=True)
+    print(f"[{request_id}] Verifying JWT locally", flush=True)
 
     try:
 
-        user_response = supabase.auth.get_user(token)
-
-        user = user_response.user
-
-        if not user:
-            print(f"[{request_id}] Invalid user", flush=True)
-            return {"error": "Invalid token"}
-
-        user_id = user.id
+        user_id = verify_token(token)
 
         print(f"[{request_id}] Authenticated user:", user_id, flush=True)
 
     except Exception as e:
 
-        print(f"[{request_id}] Auth verification failed:", str(e), flush=True)
+        print(f"[{request_id}] Token verification failed:", str(e), flush=True)
 
         return {"error": "Invalid token"}
 
@@ -169,8 +175,6 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
             print(f"[{request_id}] Repo extracted:", extract_path, flush=True)
 
-            # ================= SECURITY CHECK =================
-
             is_safe, reason = check_dangerous_code(extract_path)
 
             if not is_safe:
@@ -178,8 +182,6 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
                     "task_complete": False,
                     "error": reason
                 }
-
-            # ================= TIMEOUT =================
 
             use_timeout = sys.platform != "win32"
 
@@ -225,8 +227,6 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
     except Exception as e:
 
         print(f"[{request_id}] Usage update failed:", str(e), flush=True)
-
-    # ================= RESPONSE =================
 
     response_data = {
         "task_complete": result.get("task_complete", False),
