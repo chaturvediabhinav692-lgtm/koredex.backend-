@@ -9,6 +9,7 @@ import signal
 import tempfile
 import shutil
 import zipfile
+import uuid
 
 from ai_desktop_bot.core import debug_loop
 
@@ -16,7 +17,8 @@ from ai_desktop_bot.core import debug_loop
 # ================= LOAD ENV =================
 
 load_dotenv()
-print("Gemini key loaded:", bool(os.getenv("GEMINI_API_KEY")))
+
+print("Gemini key loaded:", bool(os.getenv("GEMINI_API_KEY")), flush=True)
 
 app = FastAPI(
     title="Koredex Backend",
@@ -88,35 +90,69 @@ def timeout_handler(signum, frame):
 @app.post("/run")
 async def run_repo(file: UploadFile = File(...), authorization: str = Header(None)):
 
+    request_id = str(uuid.uuid4())[:8]
+
+    print(f"[{request_id}] RUN ENDPOINT HIT", flush=True)
+
+    result = {}
+
     # ================= AUTH =================
 
     if not authorization:
+        print(f"[{request_id}] Missing Authorization header", flush=True)
         return {"error": "Missing token"}
 
-    token = authorization.replace("Bearer ", "")
+    if authorization.startswith("Bearer "):
+        token = authorization.split(" ")[1]
+    else:
+        token = authorization
 
     try:
-        user_response = supabase.auth.get_user(token)
-        user_id = user_response.user.id
-    except Exception:
-        return {"error": "Invalid token"}
 
-    print("Authenticated user:", user_id)
+        print(f"[{request_id}] Verifying Supabase token", flush=True)
+
+        user_response = supabase.auth.get_user(token)
+
+        user = user_response.user
+
+        if not user:
+            print(f"[{request_id}] Token valid but user missing", flush=True)
+            return {"error": "Invalid user"}
+
+        user_id = user.id
+
+        print(f"[{request_id}] Authenticated user:", user_id, flush=True)
+
+    except Exception as e:
+
+        print(f"[{request_id}] Auth failure:", str(e), flush=True)
+        return {"error": "Invalid token"}
 
     # ================= FETCH USER =================
 
-    db_response = supabase.table("users").select("*").eq("id", user_id).execute()
+    try:
 
-    if not db_response.data:
-        return {"error": "User not found"}
+        db_response = supabase.table("users").select("*").eq("id", user_id).execute()
 
-    user_data = db_response.data[0]
+        if not db_response.data:
+            print(f"[{request_id}] User not found in DB", flush=True)
+            return {"error": "User not found"}
 
-    print("Database response:", user_data)
+        user_data = db_response.data[0]
+
+        print(f"[{request_id}] DB user record:", user_data, flush=True)
+
+    except Exception as e:
+
+        print(f"[{request_id}] DB lookup failed:", str(e), flush=True)
+        return {"error": "Database error"}
 
     # ================= LIMIT CHECK =================
 
     if user_data["runs_used"] >= user_data["runs_limit"]:
+
+        print(f"[{request_id}] Usage limit reached", flush=True)
+
         return {"error": "Limit reached"}
 
     # ================= RUN BOT =================
@@ -125,29 +161,36 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
         with tempfile.TemporaryDirectory() as temp_dir:
 
+            print(f"[{request_id}] Temp dir:", temp_dir, flush=True)
+
             zip_path = os.path.join(temp_dir, file.filename)
 
             with open(zip_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
+
+            print(f"[{request_id}] Zip saved:", zip_path, flush=True)
 
             extract_path = os.path.join(temp_dir, "repo")
 
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
                 zip_ref.extractall(extract_path)
 
+            print(f"[{request_id}] Repo extracted:", extract_path, flush=True)
+
             # ================= SECURITY CHECK =================
 
             is_safe, reason = check_dangerous_code(extract_path)
 
             if not is_safe:
+
+                print(f"[{request_id}] Unsafe repo:", reason, flush=True)
+
                 return {
                     "task_complete": False,
                     "error": reason
                 }
 
-            # ================= DEBUG LOG BEFORE BOT =================
-
-            print("Starting debug_loop for:", extract_path)
+            print(f"[{request_id}] Security check passed", flush=True)
 
             # ================= TIMEOUT =================
 
@@ -156,6 +199,8 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
             if use_timeout:
                 signal.signal(signal.SIGALRM, timeout_handler)
                 signal.alarm(60)
+
+            print(f"[{request_id}] Starting debug_loop", flush=True)
 
             try:
 
@@ -166,18 +211,18 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
             except TimeoutError:
 
+                print(f"[{request_id}] Execution timeout", flush=True)
+
                 return {
                     "task_complete": False,
                     "error": "Run exceeded 60 seconds"
                 }
 
-            # ================= DEBUG LOG AFTER BOT =================
-
-            print("debug_loop result:", result)
+            print(f"[{request_id}] debug_loop result:", result, flush=True)
 
     except Exception as e:
 
-        print("Execution error:", str(e))
+        print(f"[{request_id}] Execution error:", str(e), flush=True)
 
         return {
             "task_complete": False,
@@ -192,9 +237,11 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
             "runs_used": user_data["runs_used"] + 1
         }).eq("id", user_id).execute()
 
+        print(f"[{request_id}] Usage incremented", flush=True)
+
     except Exception as e:
 
-        print("Usage update failed:", e)
+        print(f"[{request_id}] Usage update failed:", str(e), flush=True)
 
     # ================= FINAL RESPONSE =================
 
@@ -206,7 +253,7 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
         "iterations": result.get("iterations", 0)
     }
 
-    print("Returning to frontend:", response_data)
+    print(f"[{request_id}] Returning response:", response_data, flush=True)
 
     return response_data
 
