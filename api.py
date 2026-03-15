@@ -1,6 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Header
 from fastapi.middleware.cors import CORSMiddleware
-from supabase_client import supabase
 from dotenv import load_dotenv
 from jose import jwt
 
@@ -11,6 +10,7 @@ import tempfile
 import shutil
 import zipfile
 import uuid
+import requests
 
 from ai_desktop_bot.core import debug_loop
 
@@ -18,6 +18,9 @@ from ai_desktop_bot.core import debug_loop
 # ================= LOAD ENV =================
 
 load_dotenv()
+
+SUPABASE_URL = os.getenv("SUPABASE_URL").strip()
+SUPABASE_KEY = os.getenv("SUPABASE_KEY").strip()
 
 print("Gemini key loaded:", bool(os.getenv("GEMINI_API_KEY")), flush=True)
 
@@ -54,7 +57,31 @@ def extract_user_id(token: str):
     return payload.get("sub"), payload.get("role")
 
 
-# ================= SECURITY: CODE SCAN =================
+# ================= DATABASE FETCH =================
+
+def fetch_user(user_id):
+
+    url = f"{SUPABASE_URL}/rest/v1/users?id=eq.{user_id}"
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}"
+    }
+
+    response = requests.get(url, headers=headers, timeout=10)
+
+    if response.status_code != 200:
+        raise Exception(response.text)
+
+    data = response.json()
+
+    if not data:
+        return None
+
+    return data[0]
+
+
+# ================= SECURITY CHECK =================
 
 def check_dangerous_code(repo_path: str):
 
@@ -132,12 +159,10 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
     try:
 
-        db_response = supabase.table("users").select("*").eq("id", user_id).execute()
+        user_data = fetch_user(user_id)
 
-        if not db_response.data:
+        if not user_data:
             return {"error": "User not found"}
-
-        user_data = db_response.data[0]
 
         print(f"[{request_id}] DB user:", user_data, flush=True)
 
@@ -197,16 +222,6 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
         print(f"[{request_id}] Execution error:", str(e), flush=True)
 
         return {"task_complete": False, "error": str(e)}
-
-    try:
-
-        supabase.table("users").update({
-            "runs_used": user_data["runs_used"] + 1
-        }).eq("id", user_id).execute()
-
-    except Exception as e:
-
-        print(f"[{request_id}] Usage update failed:", str(e), flush=True)
 
     response_data = {
         "task_complete": result.get("task_complete", False),
