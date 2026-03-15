@@ -19,15 +19,16 @@ load_dotenv()
 print("Gemini key loaded:", bool(os.getenv("GEMINI_API_KEY")))
 
 app = FastAPI(
-    title="Koredex AI Debugger",
+    title="Koredex Backend",
     version="1.0"
 )
+
 
 # ================= HEALTH CHECK =================
 
 @app.get("/")
 def health():
-    return {"status": "koredex backend running"}
+    return {"status": "backend running"}
 
 
 # ================= ENABLE CORS =================
@@ -44,6 +45,7 @@ app.add_middleware(
 # ================= SECURITY: DANGEROUS CODE CHECK =================
 
 def check_dangerous_code(repo_path: str):
+
     dangerous_patterns = [
         "os.system",
         "rm -rf",
@@ -54,9 +56,13 @@ def check_dangerous_code(repo_path: str):
     ]
 
     for root, dirs, files in os.walk(repo_path):
+
         for file in files:
+
             if file.endswith(".py"):
+
                 filepath = os.path.join(root, file)
+
                 try:
                     with open(filepath, "r", encoding="utf-8") as f:
                         content = f.read()
@@ -64,6 +70,7 @@ def check_dangerous_code(repo_path: str):
                     for pattern in dangerous_patterns:
                         if pattern in content:
                             return False, f"Unsafe pattern detected: {pattern}"
+
                 except Exception:
                     pass
 
@@ -104,6 +111,7 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
         return {"error": "User not found"}
 
     user_data = db_response.data[0]
+
     print("Database response:", user_data)
 
     # ================= LIMIT CHECK =================
@@ -114,10 +122,10 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
     # ================= RUN BOT =================
 
     try:
+
         with tempfile.TemporaryDirectory() as temp_dir:
 
-            filename = file.filename or "repo.zip"
-            zip_path = os.path.join(temp_dir, filename)
+            zip_path = os.path.join(temp_dir, file.filename)
 
             with open(zip_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
@@ -137,6 +145,10 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
                     "error": reason
                 }
 
+            # ================= DEBUG LOG BEFORE BOT =================
+
+            print("Starting debug_loop for:", extract_path)
+
             # ================= TIMEOUT =================
 
             use_timeout = sys.platform != "win32"
@@ -146,39 +158,47 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
                 signal.alarm(60)
 
             try:
+
                 result = debug_loop(extract_path)
 
                 if use_timeout:
                     signal.alarm(0)
 
             except TimeoutError:
+
                 return {
                     "task_complete": False,
                     "error": "Run exceeded 60 seconds"
                 }
 
+            # ================= DEBUG LOG AFTER BOT =================
+
+            print("debug_loop result:", result)
+
     except Exception as e:
+
+        print("Execution error:", str(e))
+
         return {
             "task_complete": False,
             "error": str(e)
         }
 
-    # ================= DEBUG LOG =================
-
-    print("FINAL RESULT:", result)
-
     # ================= INCREMENT USAGE =================
 
     try:
+
         supabase.table("users").update({
             "runs_used": user_data["runs_used"] + 1
         }).eq("id", user_id).execute()
+
     except Exception as e:
+
         print("Usage update failed:", e)
 
-    # ================= CORRECT RESPONSE FORMAT =================
+    # ================= FINAL RESPONSE =================
 
-    return {
+    response_data = {
         "task_complete": result.get("task_complete", False),
         "failures_found": result.get("failures_found", 0),
         "failures_fixed": result.get("failures_fixed", 0),
@@ -186,10 +206,15 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
         "iterations": result.get("iterations", 0)
     }
 
+    print("Returning to frontend:", response_data)
 
-# ================= SERVER START =================
+    return response_data
+
+
+# ================= LOCAL RUN =================
 
 if __name__ == "__main__":
+
     import uvicorn
 
     port = int(os.environ.get("PORT", 8080))
