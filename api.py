@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Header
 from fastapi.middleware.cors import CORSMiddleware
 from supabase_client import supabase
 from dotenv import load_dotenv
+from jose import jwt
 
 import os
 import sys
@@ -17,6 +18,8 @@ from ai_desktop_bot.core import debug_loop
 # ================= LOAD ENV =================
 
 load_dotenv()
+
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 
 print("Gemini key loaded:", bool(os.getenv("GEMINI_API_KEY")), flush=True)
 
@@ -42,6 +45,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ================= TOKEN VERIFY =================
+
+def verify_token(token: str):
+
+    payload = jwt.decode(
+        token,
+        SUPABASE_JWT_SECRET,
+        algorithms=["HS256"],
+        audience="authenticated"
+    )
+
+    return payload["sub"]
 
 
 # ================= SECURITY: DANGEROUS CODE CHECK =================
@@ -94,41 +111,32 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
     print(f"[{request_id}] RUN ENDPOINT HIT", flush=True)
 
-    result = {}
-
-    # ================= AUTH =================
-
     if not authorization:
         print(f"[{request_id}] Missing Authorization header", flush=True)
         return {"error": "Missing token"}
+
+    # ================= TOKEN PARSE =================
 
     if authorization.startswith("Bearer "):
         token = authorization.split(" ")[1]
     else:
         token = authorization
 
+    # ================= VERIFY TOKEN LOCALLY =================
+
     try:
 
-        print(f"[{request_id}] Verifying Supabase token", flush=True)
-
-        user_response = supabase.auth.get_user(token)
-
-        user = user_response.user
-
-        if not user:
-            print(f"[{request_id}] Token valid but user missing", flush=True)
-            return {"error": "Invalid user"}
-
-        user_id = user.id
+        user_id = verify_token(token)
 
         print(f"[{request_id}] Authenticated user:", user_id, flush=True)
 
     except Exception as e:
 
-        print(f"[{request_id}] Auth failure:", str(e), flush=True)
+        print(f"[{request_id}] Token verification failed:", str(e), flush=True)
+
         return {"error": "Invalid token"}
 
-    # ================= FETCH USER =================
+    # ================= FETCH USER FROM DB =================
 
     try:
 
@@ -144,7 +152,8 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
     except Exception as e:
 
-        print(f"[{request_id}] DB lookup failed:", str(e), flush=True)
+        print(f"[{request_id}] Database error:", str(e), flush=True)
+
         return {"error": "Database error"}
 
     # ================= LIMIT CHECK =================
@@ -155,7 +164,9 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
         return {"error": "Limit reached"}
 
-    # ================= RUN BOT =================
+    # ================= EXECUTE DEBUG ENGINE =================
+
+    result = {}
 
     try:
 
@@ -167,8 +178,6 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
             with open(zip_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
-
-            print(f"[{request_id}] Zip saved:", zip_path, flush=True)
 
             extract_path = os.path.join(temp_dir, "repo")
 
@@ -189,8 +198,6 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
                     "task_complete": False,
                     "error": reason
                 }
-
-            print(f"[{request_id}] Security check passed", flush=True)
 
             # ================= TIMEOUT =================
 
@@ -229,7 +236,7 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
             "error": str(e)
         }
 
-    # ================= INCREMENT USAGE =================
+    # ================= UPDATE USAGE =================
 
     try:
 
@@ -243,7 +250,7 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
         print(f"[{request_id}] Usage update failed:", str(e), flush=True)
 
-    # ================= FINAL RESPONSE =================
+    # ================= RESPONSE =================
 
     response_data = {
         "task_complete": result.get("task_complete", False),
