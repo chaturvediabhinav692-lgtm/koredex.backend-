@@ -11,6 +11,8 @@ import shutil
 import zipfile
 import uuid
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from ai_desktop_bot.core import debug_loop
 
@@ -23,6 +25,25 @@ SUPABASE_URL = os.getenv("SUPABASE_URL").strip()
 SUPABASE_KEY = os.getenv("SUPABASE_KEY").strip()
 
 print("Gemini key loaded:", bool(os.getenv("GEMINI_API_KEY")), flush=True)
+
+
+# ================= HTTP CLIENT WITH RETRY =================
+
+session = requests.Session()
+
+retry = Retry(
+    total=5,
+    backoff_factor=1,
+    status_forcelist=[500, 502, 503, 504]
+)
+
+adapter = HTTPAdapter(max_retries=retry)
+
+session.mount("https://", adapter)
+session.mount("http://", adapter)
+
+
+# ================= FASTAPI =================
 
 app = FastAPI(
     title="Koredex Backend",
@@ -57,7 +78,7 @@ def extract_user_id(token: str):
     return payload.get("sub"), payload.get("role")
 
 
-# ================= DATABASE FETCH =================
+# ================= DATABASE =================
 
 def fetch_user(user_id):
 
@@ -68,7 +89,7 @@ def fetch_user(user_id):
         "Authorization": f"Bearer {SUPABASE_KEY}"
     }
 
-    response = requests.get(url, headers=headers, timeout=10)
+    response = session.get(url, headers=headers, timeout=30)
 
     if response.status_code != 200:
         raise Exception(response.text)
@@ -81,7 +102,7 @@ def fetch_user(user_id):
     return data[0]
 
 
-# ================= SECURITY CHECK =================
+# ================= SECURITY =================
 
 def check_dangerous_code(repo_path: str):
 
