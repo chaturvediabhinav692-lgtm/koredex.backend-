@@ -2,7 +2,6 @@ from fastapi import FastAPI, UploadFile, File, Header
 from fastapi.middleware.cors import CORSMiddleware
 from supabase_client import supabase
 from dotenv import load_dotenv
-from jose import jwt
 
 import os
 import sys
@@ -19,8 +18,6 @@ from ai_desktop_bot.core import debug_loop
 
 load_dotenv()
 
-SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
-
 print("Gemini key loaded:", bool(os.getenv("GEMINI_API_KEY")), flush=True)
 
 app = FastAPI(
@@ -29,14 +26,14 @@ app = FastAPI(
 )
 
 
-# ================= HEALTH CHECK =================
+# ================= HEALTH =================
 
 @app.get("/")
 def health():
     return {"status": "backend running"}
 
 
-# ================= ENABLE CORS =================
+# ================= CORS =================
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,21 +44,7 @@ app.add_middleware(
 )
 
 
-# ================= TOKEN VERIFY =================
-
-def verify_token(token: str):
-
-    payload = jwt.decode(
-        token,
-        SUPABASE_JWT_SECRET,
-        algorithms=["HS256"],
-        audience="authenticated"
-    )
-
-    return payload["sub"]
-
-
-# ================= SECURITY: DANGEROUS CODE CHECK =================
+# ================= SECURITY: CODE SCAN =================
 
 def check_dangerous_code(repo_path: str):
 
@@ -96,7 +79,7 @@ def check_dangerous_code(repo_path: str):
     return True, "safe"
 
 
-# ================= SECURITY: TIMEOUT =================
+# ================= TIMEOUT =================
 
 def timeout_handler(signum, frame):
     raise TimeoutError("Run exceeded 60 seconds")
@@ -111,68 +94,70 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
     print(f"[{request_id}] RUN ENDPOINT HIT", flush=True)
 
+    # ================= AUTH =================
+
     if not authorization:
         print(f"[{request_id}] Missing Authorization header", flush=True)
         return {"error": "Missing token"}
-
-    # ================= TOKEN PARSE =================
 
     if authorization.startswith("Bearer "):
         token = authorization.split(" ")[1]
     else:
         token = authorization
 
-    # ================= VERIFY TOKEN LOCALLY =================
-
     try:
 
-        user_id = verify_token(token)
+        print(f"[{request_id}] Verifying Supabase token", flush=True)
+
+        user_response = supabase.auth.get_user(token)
+
+        user = user_response.user
+
+        if not user:
+            print(f"[{request_id}] Invalid user", flush=True)
+            return {"error": "Invalid token"}
+
+        user_id = user.id
 
         print(f"[{request_id}] Authenticated user:", user_id, flush=True)
 
     except Exception as e:
 
-        print(f"[{request_id}] Token verification failed:", str(e), flush=True)
+        print(f"[{request_id}] Auth verification failed:", str(e), flush=True)
 
         return {"error": "Invalid token"}
 
-    # ================= FETCH USER FROM DB =================
+    # ================= FETCH USER =================
 
     try:
 
         db_response = supabase.table("users").select("*").eq("id", user_id).execute()
 
         if not db_response.data:
-            print(f"[{request_id}] User not found in DB", flush=True)
             return {"error": "User not found"}
 
         user_data = db_response.data[0]
 
-        print(f"[{request_id}] DB user record:", user_data, flush=True)
+        print(f"[{request_id}] DB user:", user_data, flush=True)
 
     except Exception as e:
 
-        print(f"[{request_id}] Database error:", str(e), flush=True)
+        print(f"[{request_id}] DB error:", str(e), flush=True)
 
         return {"error": "Database error"}
 
     # ================= LIMIT CHECK =================
 
     if user_data["runs_used"] >= user_data["runs_limit"]:
-
-        print(f"[{request_id}] Usage limit reached", flush=True)
-
         return {"error": "Limit reached"}
 
-    # ================= EXECUTE DEBUG ENGINE =================
-
     result = {}
+
+    # ================= RUN DEBUG ENGINE =================
 
     try:
 
         with tempfile.TemporaryDirectory() as temp_dir:
-
-            print(f"[{request_id}] Temp dir:", temp_dir, flush=True)
 
             zip_path = os.path.join(temp_dir, file.filename)
 
@@ -186,14 +171,11 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
             print(f"[{request_id}] Repo extracted:", extract_path, flush=True)
 
-            # ================= SECURITY CHECK =================
+            # ================= SECURITY =================
 
             is_safe, reason = check_dangerous_code(extract_path)
 
             if not is_safe:
-
-                print(f"[{request_id}] Unsafe repo:", reason, flush=True)
-
                 return {
                     "task_complete": False,
                     "error": reason
@@ -218,8 +200,6 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
             except TimeoutError:
 
-                print(f"[{request_id}] Execution timeout", flush=True)
-
                 return {
                     "task_complete": False,
                     "error": "Run exceeded 60 seconds"
@@ -243,8 +223,6 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
         supabase.table("users").update({
             "runs_used": user_data["runs_used"] + 1
         }).eq("id", user_id).execute()
-
-        print(f"[{request_id}] Usage incremented", flush=True)
 
     except Exception as e:
 
