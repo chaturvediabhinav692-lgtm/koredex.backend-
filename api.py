@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Header
 from fastapi.middleware.cors import CORSMiddleware
 from supabase_client import supabase
 from dotenv import load_dotenv
+from jose import jwt
 
 import os
 import sys
@@ -42,6 +43,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ================= TOKEN PARSER =================
+
+def extract_user_id(token: str):
+
+    payload = jwt.get_unverified_claims(token)
+
+    return payload.get("sub"), payload.get("role")
 
 
 # ================= SECURITY: CODE SCAN =================
@@ -94,39 +104,29 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
     print(f"[{request_id}] RUN ENDPOINT HIT", flush=True)
 
-    # ================= AUTH =================
-
     if not authorization:
-        print(f"[{request_id}] Missing Authorization header", flush=True)
         return {"error": "Missing token"}
 
-    # Clean token
     token = authorization.replace("Bearer", "").strip()
 
-    # Debug preview so we can verify frontend sends correct token
     print("Token preview:", token[:30], flush=True)
-
-    print(f"[{request_id}] Verifying Supabase token", flush=True)
 
     try:
 
-        user_response = supabase.auth.get_user(token)
+        user_id, role = extract_user_id(token)
 
-        user = user_response.user
+        print(f"[{request_id}] Token role:", role, flush=True)
 
-        if not user:
-            print(f"[{request_id}] Invalid user", flush=True)
-            return {"error": "Invalid token"}
-
-        user_id = user.id
+        if role != "authenticated":
+            return {"error": "User not authenticated"}
 
         print(f"[{request_id}] Authenticated user:", user_id, flush=True)
 
     except Exception as e:
 
-        print(f"[{request_id}] Auth verification failed:", str(e), flush=True)
+        print(f"[{request_id}] Token parsing failed:", str(e), flush=True)
 
-        return {"error": "Invalid or expired token"}
+        return {"error": "Invalid token"}
 
     # ================= FETCH USER =================
 
@@ -147,14 +147,10 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
         return {"error": "Database error"}
 
-    # ================= LIMIT CHECK =================
-
     if user_data["runs_used"] >= user_data["runs_limit"]:
         return {"error": "Limit reached"}
 
     result = {}
-
-    # ================= RUN DEBUG ENGINE =================
 
     try:
 
@@ -172,17 +168,10 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
             print(f"[{request_id}] Repo extracted:", extract_path, flush=True)
 
-            # ================= SECURITY CHECK =================
-
             is_safe, reason = check_dangerous_code(extract_path)
 
             if not is_safe:
-                return {
-                    "task_complete": False,
-                    "error": reason
-                }
-
-            # ================= TIMEOUT =================
+                return {"task_complete": False, "error": reason}
 
             use_timeout = sys.platform != "win32"
 
@@ -193,18 +182,13 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
             print(f"[{request_id}] Starting debug_loop", flush=True)
 
             try:
-
                 result = debug_loop(extract_path)
 
                 if use_timeout:
                     signal.alarm(0)
 
             except TimeoutError:
-
-                return {
-                    "task_complete": False,
-                    "error": "Run exceeded 60 seconds"
-                }
+                return {"task_complete": False, "error": "Run exceeded 60 seconds"}
 
             print(f"[{request_id}] debug_loop result:", result, flush=True)
 
@@ -212,12 +196,7 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
         print(f"[{request_id}] Execution error:", str(e), flush=True)
 
-        return {
-            "task_complete": False,
-            "error": str(e)
-        }
-
-    # ================= UPDATE USAGE =================
+        return {"task_complete": False, "error": str(e)}
 
     try:
 
@@ -228,8 +207,6 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
     except Exception as e:
 
         print(f"[{request_id}] Usage update failed:", str(e), flush=True)
-
-    # ================= RESPONSE =================
 
     response_data = {
         "task_complete": result.get("task_complete", False),
