@@ -11,8 +11,6 @@ import shutil
 import zipfile
 import uuid
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 from ai_desktop_bot.core import debug_loop
 
@@ -21,26 +19,10 @@ from ai_desktop_bot.core import debug_loop
 
 load_dotenv()
 
-SUPABASE_URL = os.getenv("SUPABASE_URL").strip()
-SUPABASE_KEY = os.getenv("SUPABASE_KEY").strip()
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
 
 print("Gemini key loaded:", bool(os.getenv("GEMINI_API_KEY")), flush=True)
-
-
-# ================= HTTP CLIENT WITH RETRY =================
-
-session = requests.Session()
-
-retry = Retry(
-    total=5,
-    backoff_factor=1,
-    status_forcelist=[500, 502, 503, 504]
-)
-
-adapter = HTTPAdapter(max_retries=retry)
-
-session.mount("https://", adapter)
-session.mount("http://", adapter)
 
 
 # ================= FASTAPI =================
@@ -49,13 +31,6 @@ app = FastAPI(
     title="Koredex Backend",
     version="1.0"
 )
-
-
-# ================= HEALTH =================
-
-@app.get("/")
-def health():
-    return {"status": "backend running"}
 
 
 # ================= CORS =================
@@ -69,16 +44,23 @@ app.add_middleware(
 )
 
 
+# ================= HEALTH =================
+
+@app.get("/")
+def health():
+    return {"status": "backend running"}
+
+
 # ================= TOKEN PARSER =================
 
-def extract_user_id(token: str):
+def extract_user(token):
 
     payload = jwt.get_unverified_claims(token)
 
     return payload.get("sub"), payload.get("role")
 
 
-# ================= DATABASE =================
+# ================= FETCH USER =================
 
 def fetch_user(user_id):
 
@@ -89,24 +71,32 @@ def fetch_user(user_id):
         "Authorization": f"Bearer {SUPABASE_KEY}"
     }
 
-    response = session.get(url, headers=headers, timeout=30)
+    try:
 
-    if response.status_code != 200:
-        raise Exception(response.text)
+        r = requests.get(url, headers=headers, timeout=30)
 
-    data = response.json()
+        if r.status_code != 200:
+            raise Exception(r.text)
 
-    if not data:
+        data = r.json()
+
+        if not data:
+            return None
+
+        return data[0]
+
+    except Exception as e:
+
+        print("DB request failed:", str(e), flush=True)
+
         return None
-
-    return data[0]
 
 
 # ================= SECURITY =================
 
-def check_dangerous_code(repo_path: str):
+def check_dangerous_code(repo_path):
 
-    dangerous_patterns = [
+    dangerous = [
         "os.system",
         "rm -rf",
         "shutil.rmtree",
@@ -117,21 +107,21 @@ def check_dangerous_code(repo_path: str):
 
     for root, dirs, files in os.walk(repo_path):
 
-        for file in files:
+        for f in files:
 
-            if file.endswith(".py"):
+            if f.endswith(".py"):
 
-                filepath = os.path.join(root, file)
+                path = os.path.join(root, f)
 
                 try:
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        content = f.read()
 
-                    for pattern in dangerous_patterns:
-                        if pattern in content:
-                            return False, f"Unsafe pattern detected: {pattern}"
+                    content = open(path, encoding="utf-8").read()
 
-                except Exception:
+                    for p in dangerous:
+                        if p in content:
+                            return False, f"Unsafe pattern: {p}"
+
+                except:
                     pass
 
     return True, "safe"
@@ -159,9 +149,11 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
     print("Token preview:", token[:30], flush=True)
 
+    # ================= AUTH =================
+
     try:
 
-        user_id, role = extract_user_id(token)
+        user_id, role = extract_user(token)
 
         print(f"[{request_id}] Token role:", role, flush=True)
 
@@ -172,29 +164,28 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
     except Exception as e:
 
-        print(f"[{request_id}] Token parsing failed:", str(e), flush=True)
+        print("Token parse failed:", str(e), flush=True)
 
         return {"error": "Invalid token"}
 
-    # ================= FETCH USER =================
 
-    try:
+    # ================= DB =================
 
-        user_data = fetch_user(user_id)
+    user_data = fetch_user(user_id)
 
-        if not user_data:
-            return {"error": "User not found"}
+    if user_data:
 
         print(f"[{request_id}] DB user:", user_data, flush=True)
 
-    except Exception as e:
+        if user_data["runs_used"] >= user_data["runs_limit"]:
+            return {"error": "Limit reached"}
 
-        print(f"[{request_id}] DB error:", str(e), flush=True)
+    else:
 
-        return {"error": "Database error"}
+        print(f"[{request_id}] DB unavailable — continuing without quota check", flush=True)
 
-    if user_data["runs_used"] >= user_data["runs_limit"]:
-        return {"error": "Limit reached"}
+
+    # ================= DEBUG ENGINE =================
 
     result = {}
 
@@ -214,37 +205,34 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
             print(f"[{request_id}] Repo extracted:", extract_path, flush=True)
 
-            is_safe, reason = check_dangerous_code(extract_path)
+            safe, reason = check_dangerous_code(extract_path)
 
-            if not is_safe:
+            if not safe:
                 return {"task_complete": False, "error": reason}
 
-            use_timeout = sys.platform != "win32"
-
-            if use_timeout:
+            if sys.platform != "win32":
                 signal.signal(signal.SIGALRM, timeout_handler)
                 signal.alarm(60)
 
             print(f"[{request_id}] Starting debug_loop", flush=True)
 
-            try:
-                result = debug_loop(extract_path)
+            result = debug_loop(extract_path)
 
-                if use_timeout:
-                    signal.alarm(0)
-
-            except TimeoutError:
-                return {"task_complete": False, "error": "Run exceeded 60 seconds"}
+            if sys.platform != "win32":
+                signal.alarm(0)
 
             print(f"[{request_id}] debug_loop result:", result, flush=True)
 
     except Exception as e:
 
-        print(f"[{request_id}] Execution error:", str(e), flush=True)
+        print("Execution error:", str(e), flush=True)
 
         return {"task_complete": False, "error": str(e)}
 
-    response_data = {
+
+    # ================= RESPONSE =================
+
+    response = {
         "task_complete": result.get("task_complete", False),
         "failures_found": result.get("failures_found", 0),
         "failures_fixed": result.get("failures_fixed", 0),
@@ -252,9 +240,9 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
         "iterations": result.get("iterations", 0)
     }
 
-    print(f"[{request_id}] Returning response:", response_data, flush=True)
+    print(f"[{request_id}] Returning response:", response, flush=True)
 
-    return response_data
+    return response
 
 
 # ================= LOCAL RUN =================
@@ -265,8 +253,4 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 8080))
 
-    uvicorn.run(
-        "api:app",
-        host="0.0.0.0",
-        port=port
-    )
+    uvicorn.run("api:app", host="0.0.0.0", port=port)
