@@ -100,14 +100,12 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
         print(f"[{request_id}] Missing Authorization header", flush=True)
         return {"error": "Missing token"}
 
-    if authorization.startswith("Bearer "):
-        token = authorization.split(" ")[1]
-    else:
-        token = authorization
+    # sanitize token (remove Bearer + newline + spaces)
+    token = authorization.replace("Bearer", "").strip()
+
+    print(f"[{request_id}] Verifying Supabase token", flush=True)
 
     try:
-
-        print(f"[{request_id}] Verifying Supabase token", flush=True)
 
         user_response = supabase.auth.get_user(token)
 
@@ -171,7 +169,7 @@ async def run_repo(file: UploadFile = File(...), authorization: str = Header(Non
 
             print(f"[{request_id}] Repo extracted:", extract_path, flush=True)
 
-            # ================= SECURITY =================
+            # ================= SECURITY CHECK =================
 
             is_safe, reason = check_dangerous_code(extract_path)
 
